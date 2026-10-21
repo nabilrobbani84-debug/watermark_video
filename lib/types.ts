@@ -25,6 +25,9 @@ export interface WatermarkRegion {
   height: number;
   confidence: number;
   label: string;
+  analysisMethod?: string;
+  analysisExplanation?: string;
+  canAutoProcess?: boolean;
 }
 
 export interface VideoMetadata {
@@ -54,6 +57,7 @@ export interface QualityReport {
   inputDuration: number;
   outputDuration: number;
   notes: string[];
+  inpaintAdapter?: string;
 }
 
 export interface Job {
@@ -75,11 +79,13 @@ export interface Job {
   processingMethod: ProcessingMethod;
   qualityReport?: QualityReport;
   error?: string;
+  canAutoProcess?: boolean;
 }
 
 export interface CreateJobResponse {
   jobId: string;
   token: string;
+  sessionToken: string;
   expiresAt: number;
 }
 
@@ -95,5 +101,17 @@ export interface JobStatusResponse {
   confirmedRegion?: WatermarkRegion;
   qualityReport?: QualityReport;
   hasProcessedVideo: boolean;
+  canAutoProcess?: boolean;
   error?: string;
+}
+
+export interface JobResultResponse {
+  jobId: string;
+  status: JobStatus;
+  hasProcessedVideo: boolean;
+  downloadUrl: string;
+  previewUrl: string;
+  originalPreviewUrl: string;
+  qualityReport?: QualityReport;
+  metadata?: VideoMetadata;
 }

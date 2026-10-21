@@ -148,6 +148,20 @@ export function QualityReportModal({
           </div>
         </div>
 
+        {/* Engine and Notes list */}
+        {report.notes && report.notes.length > 0 && (
+          <div className="mb-6 p-3.5 rounded-xl bg-black/40 border border-white/5 space-y-2">
+            <span className="text-[11px] font-mono font-semibold text-cyan-400 block">
+              ENGINE: {report.inpaintAdapter || 'FFmpeg Delogo Interpolation Engine'}
+            </span>
+            <ul className="space-y-1 text-[11px] text-slate-400 list-disc list-inside">
+              {report.notes.map((note, idx) => (
+                <li key={idx}>{note}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* Engineering Transparency Notice */}
         <div className="p-4 rounded-xl bg-violet-950/20 border border-violet-800/30 text-xs text-slate-300 space-y-2 mb-6">
           <div className="flex items-center gap-1.5 font-semibold text-violet-300">

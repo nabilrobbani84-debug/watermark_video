@@ -1,48 +1,107 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createReadStream, promises as fs } from 'node:fs';
 import { Readable } from 'node:stream';
-import { getJob, isSafePath, verifyJobToken } from '@/lib/job-store';
+import { isSafePath } from '@/lib/job-store';
+import { validateJobSession } from '@/lib/job-session';
+import { logDiagnostic } from '@/lib/logger';
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> }
 ) {
   const { jobId } = await params;
-  const token = req.headers.get('x-job-token') || req.nextUrl.searchParams.get('token');
+  const validation = validateJobSession(req, jobId, {
+    endpoint: 'GET /api/v1/jobs/[jobId]/download',
+  });
 
-  const job = getJob(jobId);
-  if (!job || !verifyJobToken(job, token)) {
-    return NextResponse.json({ error: 'Unauthorized or expired download link' }, { status: 403 });
+  if (!validation.ok) {
+    return validation.response;
   }
 
+  const { job, correlationId } = validation;
+
   if (job.status !== 'READY' || !job.processedFilePath) {
-    return NextResponse.json({ error: 'Processed video is not ready for download' }, { status: 400 });
+    logDiagnostic({
+      correlationId,
+      endpoint: 'GET /api/v1/jobs/[jobId]/download',
+      jobId,
+      jobState: job.status,
+      errorCategory: 'INVALID_STATE',
+      httpStatus: 400,
+      message: 'Processed video is not ready for download yet',
+    });
+    return NextResponse.json(
+      { error: 'Processed video is not ready for download yet' },
+      { status: 400 }
+    );
   }
 
   if (!isSafePath(job.processedFilePath)) {
-    return NextResponse.json({ error: 'Invalid file target' }, { status: 403 });
+    logDiagnostic({
+      correlationId,
+      endpoint: 'GET /api/v1/jobs/[jobId]/download',
+      jobId,
+      jobState: job.status,
+      errorCategory: 'AUTH_FORBIDDEN',
+      httpStatus: 403,
+      message: 'Path traversal attempt rejected',
+    });
+    return NextResponse.json({ error: 'Invalid file path traversal attempt' }, { status: 403 });
   }
 
   try {
     const stat = await fs.stat(job.processedFilePath);
+    if (stat.size === 0) {
+      logDiagnostic({
+        correlationId,
+        endpoint: 'GET /api/v1/jobs/[jobId]/download',
+        jobId,
+        jobState: job.status,
+        errorCategory: 'INTERNAL_ERROR',
+        httpStatus: 500,
+        message: 'Processed video file is empty',
+      });
+      return NextResponse.json({ error: 'Processed video file is empty' }, { status: 500 });
+    }
+
     const nodeStream = createReadStream(job.processedFilePath);
     const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
 
-    const filename = `vanishframe_cleaned_${job.id.slice(0, 8)}.mp4`;
+    const baseName = job.originalFileName
+      ? `vanishframe_cleaned_${job.originalFileName.replace(/\.[^/.]+$/, '')}.mp4`
+      : `vanishframe_cleaned_${job.id.slice(0, 8)}.mp4`;
+
+    logDiagnostic({
+      correlationId,
+      endpoint: 'GET /api/v1/jobs/[jobId]/download',
+      jobId,
+      jobState: job.status,
+      errorCategory: 'SUCCESS',
+      httpStatus: 200,
+      message: 'Processed video download stream started',
+    });
 
     return new NextResponse(webStream, {
       status: 200,
       headers: {
         'Content-Type': 'video/mp4',
         'Content-Length': stat.size.toString(),
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        'Cache-Control': 'no-store, must-revalidate',
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(baseName)}"`,
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0',
       },
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Error serving download';
+    const msg = err instanceof Error ? err.message : 'Error serving download file';
+    logDiagnostic({
+      correlationId,
+      endpoint: 'GET /api/v1/jobs/[jobId]/download',
+      jobId,
+      errorCategory: 'INTERNAL_ERROR',
+      httpStatus: 500,
+      message: msg,
+    });
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

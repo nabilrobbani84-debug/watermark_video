@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { getJob, getJobDir, sanitizeFileName, updateJob, verifyJobToken } from '@/lib/job-store';
+import { getJobDir, sanitizeFileName, updateJob } from '@/lib/job-store';
+import { validateJobSession } from '@/lib/job-session';
+import { logDiagnostic } from '@/lib/logger';
 import {
-  detectCandidateWatermark,
+  analyzeVideoForWatermark,
   extractPreviewFrame,
   probeVideo,
 } from '@/lib/ffmpeg-runner';
@@ -15,23 +17,45 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> }
 ) {
+  const { jobId } = await params;
+  const validation = validateJobSession(req, jobId, {
+    endpoint: 'POST /api/v1/jobs/[jobId]/upload',
+    allowedStatuses: ['CREATED', 'UPLOADING', 'FAILED'],
+  });
+
+  if (!validation.ok) {
+    return validation.response;
+  }
+
+  const { correlationId } = validation;
+
   try {
-    const { jobId } = await params;
-    const token = req.headers.get('x-job-token') || req.nextUrl.searchParams.get('token');
-
-    const job = getJob(jobId);
-    if (!job || !verifyJobToken(job, token)) {
-      return NextResponse.json({ error: 'Unauthorized or invalid job session' }, { status: 403 });
-    }
-
     const formData = await req.formData();
     const file = formData.get('video') as File | null;
 
     if (!file) {
+      logDiagnostic({
+        correlationId,
+        endpoint: 'POST /api/v1/jobs/[jobId]/upload',
+        jobId,
+        jobState: validation.job.status,
+        errorCategory: 'INVALID_INPUT',
+        httpStatus: 400,
+        message: 'No video file provided in form data',
+      });
       return NextResponse.json({ error: 'No video file provided' }, { status: 400 });
     }
 
     if (file.size > MAX_FILE_SIZE) {
+      logDiagnostic({
+        correlationId,
+        endpoint: 'POST /api/v1/jobs/[jobId]/upload',
+        jobId,
+        jobState: validation.job.status,
+        errorCategory: 'INVALID_INPUT',
+        httpStatus: 413,
+        message: 'File exceeds 200MB maximum size limit',
+      });
       return NextResponse.json(
         { error: 'File exceeds maximum upload size of 200MB' },
         { status: 413 }
@@ -42,14 +66,14 @@ export async function POST(
     const safeName = sanitizeFileName(file.name || 'uploaded_video.mp4');
     const targetFilePath = path.join(jobDir, `orig_${safeName}`);
 
-    // Convert file to ArrayBuffer and save to ephemeral disk
+    // Stream / buffer file to disk
     const arrayBuffer = await file.arrayBuffer();
     await fs.writeFile(targetFilePath, Buffer.from(arrayBuffer));
 
     updateJob(jobId, {
       status: 'ANALYZING',
       progress: 20,
-      stageMessage: 'Analyzing media stream metadata with ffprobe...',
+      stageMessage: 'Analyzing media stream metadata and temporal variance with FFmpeg...',
       originalFileName: file.name,
       originalFilePath: targetFilePath,
     });
@@ -65,26 +89,54 @@ export async function POST(
       // Ignore preview frame extraction failure if video is very short
     }
 
-    // Automatically detect candidate watermark region
-    const detectedRegion = detectCandidateWatermark(metadata, 'bottom-right');
+    // Genuine multi-frame temporal variance analysis
+    const detectedRegion = await analyzeVideoForWatermark(targetFilePath, metadata, jobDir);
 
     updateJob(jobId, {
       status: 'AWAITING_CONFIRMATION',
       progress: 35,
-      stageMessage: 'Candidate watermark region detected. Awaiting confirmation.',
+      stageMessage: detectedRegion.canAutoProcess
+        ? `Watermark candidate identified with high confidence (${Math.round(detectedRegion.confidence * 100)}%). Ready to restore.`
+        : `Candidate region identified. Please confirm or adjust coordinates.`,
       metadata,
       detectedRegion,
       confirmedRegion: detectedRegion,
       previewThumbnailPath: previewFramePath,
+      canAutoProcess: detectedRegion.canAutoProcess,
+    });
+
+    logDiagnostic({
+      correlationId,
+      endpoint: 'POST /api/v1/jobs/[jobId]/upload',
+      jobId,
+      jobState: 'AWAITING_CONFIRMATION',
+      errorCategory: 'SUCCESS',
+      httpStatus: 200,
+      message: 'Video uploaded and analyzed successfully',
     });
 
     return NextResponse.json({
       success: true,
       metadata,
       detectedRegion,
+      canAutoProcess: detectedRegion.canAutoProcess,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Upload failed';
+    updateJob(jobId, {
+      status: 'FAILED',
+      progress: 0,
+      stageMessage: `Analysis error: ${message}`,
+      error: message,
+    });
+    logDiagnostic({
+      correlationId,
+      endpoint: 'POST /api/v1/jobs/[jobId]/upload',
+      jobId,
+      errorCategory: 'FFMPEG_ERROR',
+      httpStatus: 500,
+      message,
+    });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

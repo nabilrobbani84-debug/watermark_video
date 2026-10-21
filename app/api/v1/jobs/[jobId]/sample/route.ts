@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'node:path';
-import { getJob, getJobDir, updateJob, verifyJobToken } from '@/lib/job-store';
+import { getJobDir, updateJob } from '@/lib/job-store';
+import { validateJobSession } from '@/lib/job-session';
+import { logDiagnostic } from '@/lib/logger';
 import {
+  analyzeVideoForWatermark,
   createSyntheticSampleVideo,
-  detectCandidateWatermark,
   extractPreviewFrame,
 } from '@/lib/ffmpeg-runner';
 
@@ -11,15 +13,19 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> }
 ) {
+  const { jobId } = await params;
+  const validation = validateJobSession(req, jobId, {
+    endpoint: 'POST /api/v1/jobs/[jobId]/sample',
+    allowedStatuses: ['CREATED', 'FAILED'],
+  });
+
+  if (!validation.ok) {
+    return validation.response;
+  }
+
+  const { correlationId } = validation;
+
   try {
-    const { jobId } = await params;
-    const token = req.headers.get('x-job-token') || req.nextUrl.searchParams.get('token');
-
-    const job = getJob(jobId);
-    if (!job || !verifyJobToken(job, token)) {
-      return NextResponse.json({ error: 'Unauthorized or invalid job session' }, { status: 403 });
-    }
-
     const jobDir = getJobDir(jobId);
     const sampleFilePath = path.join(jobDir, 'sample_watermark_video.mp4');
 
@@ -40,7 +46,7 @@ export async function POST(
       // ignore
     }
 
-    const detectedRegion = detectCandidateWatermark(metadata, 'bottom-right');
+    const detectedRegion = await analyzeVideoForWatermark(sampleFilePath, metadata, jobDir);
 
     updateJob(jobId, {
       status: 'AWAITING_CONFIRMATION',
@@ -50,15 +56,41 @@ export async function POST(
       detectedRegion,
       confirmedRegion: detectedRegion,
       previewThumbnailPath: previewFramePath,
+      canAutoProcess: detectedRegion.canAutoProcess,
+    });
+
+    logDiagnostic({
+      correlationId,
+      endpoint: 'POST /api/v1/jobs/[jobId]/sample',
+      jobId,
+      jobState: 'AWAITING_CONFIRMATION',
+      errorCategory: 'SUCCESS',
+      httpStatus: 200,
+      message: 'Synthetic sample video created and analyzed',
     });
 
     return NextResponse.json({
       success: true,
       metadata,
       detectedRegion,
+      canAutoProcess: detectedRegion.canAutoProcess,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Sample generation failed';
+    updateJob(jobId, {
+      status: 'FAILED',
+      progress: 0,
+      stageMessage: `Sample generation failed: ${message}`,
+      error: message,
+    });
+    logDiagnostic({
+      correlationId,
+      endpoint: 'POST /api/v1/jobs/[jobId]/sample',
+      jobId,
+      errorCategory: 'FFMPEG_ERROR',
+      httpStatus: 500,
+      message,
+    });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

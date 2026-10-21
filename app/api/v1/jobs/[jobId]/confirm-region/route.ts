@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getJob, updateJob, verifyJobToken } from '@/lib/job-store';
+import { updateJob } from '@/lib/job-store';
+import { validateJobSession } from '@/lib/job-session';
+import { logDiagnostic } from '@/lib/logger';
 import { clampRegion } from '@/lib/ffmpeg-runner';
 import type { ProcessingMethod, WatermarkRegion } from '@/lib/types';
 
@@ -7,16 +9,29 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> }
 ) {
+  const { jobId } = await params;
+  const validation = validateJobSession(req, jobId, {
+    endpoint: 'POST /api/v1/jobs/[jobId]/confirm-region',
+    allowedStatuses: ['AWAITING_CONFIRMATION', 'QUEUED', 'FAILED'],
+  });
+
+  if (!validation.ok) {
+    return validation.response;
+  }
+
+  const { job, correlationId } = validation;
+
   try {
-    const { jobId } = await params;
-    const token = req.headers.get('x-job-token') || req.nextUrl.searchParams.get('token');
-
-    const job = getJob(jobId);
-    if (!job || !verifyJobToken(job, token)) {
-      return NextResponse.json({ error: 'Unauthorized or invalid job session' }, { status: 403 });
-    }
-
     if (!job.metadata) {
+      logDiagnostic({
+        correlationId,
+        endpoint: 'POST /api/v1/jobs/[jobId]/confirm-region',
+        jobId,
+        jobState: job.status,
+        errorCategory: 'INVALID_STATE',
+        httpStatus: 400,
+        message: 'Video metadata missing before confirmation',
+      });
       return NextResponse.json({ error: 'Video metadata missing' }, { status: 400 });
     }
 
@@ -25,6 +40,15 @@ export async function POST(
     const method = (body.method as ProcessingMethod) || 'delogo-interpolated';
 
     if (!inputRegion || typeof inputRegion.x !== 'number') {
+      logDiagnostic({
+        correlationId,
+        endpoint: 'POST /api/v1/jobs/[jobId]/confirm-region',
+        jobId,
+        jobState: job.status,
+        errorCategory: 'INVALID_INPUT',
+        httpStatus: 400,
+        message: 'Invalid region coordinates provided in payload',
+      });
       return NextResponse.json({ error: 'Invalid region coordinates provided' }, { status: 400 });
     }
 
@@ -38,6 +62,16 @@ export async function POST(
       processingMethod: method,
     });
 
+    logDiagnostic({
+      correlationId,
+      endpoint: 'POST /api/v1/jobs/[jobId]/confirm-region',
+      jobId,
+      jobState: 'QUEUED',
+      errorCategory: 'SUCCESS',
+      httpStatus: 200,
+      message: 'Region coordinates confirmed and clamped to stream boundaries',
+    });
+
     return NextResponse.json({
       success: true,
       confirmedRegion: clamped,
@@ -45,6 +79,14 @@ export async function POST(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Region confirmation failed';
+    logDiagnostic({
+      correlationId,
+      endpoint: 'POST /api/v1/jobs/[jobId]/confirm-region',
+      jobId,
+      errorCategory: 'INTERNAL_ERROR',
+      httpStatus: 500,
+      message,
+    });
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

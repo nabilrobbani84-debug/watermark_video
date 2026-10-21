@@ -10,11 +10,13 @@ import {
   Sparkles,
   Wand2,
 } from 'lucide-react';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { apiClient } from '@/lib/api-client';
 import type { ProcessingMethod, VideoMetadata, WatermarkRegion } from '@/lib/types';
 
 interface RegionSelectorProps {
   jobId: string;
+  token: string;
   metadata: VideoMetadata;
   initialRegion: WatermarkRegion;
   onConfirm: (region: WatermarkRegion, method: ProcessingMethod) => void;
@@ -24,6 +26,7 @@ interface RegionSelectorProps {
 
 export function RegionSelector({
   jobId,
+  token,
   metadata,
   initialRegion,
   onConfirm,
@@ -32,6 +35,31 @@ export function RegionSelector({
 }: RegionSelectorProps) {
   const [region, setRegion] = useState<WatermarkRegion>(initialRegion);
   const [method, setMethod] = useState<ProcessingMethod>('delogo-interpolated');
+  const [frameBlobUrl, setFrameBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    let createdUrl: string | null = null;
+
+    apiClient
+      .fetchMediaBlob(jobId, token, 'frame')
+      .then((blob) => {
+        if (active) {
+          createdUrl = URL.createObjectURL(blob);
+          setFrameBlobUrl(createdUrl);
+        }
+      })
+      .catch(() => {
+        // Fallback: If blob fetch fails, keep placeholder
+      });
+
+    return () => {
+      active = false;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
+    };
+  }, [jobId, token]);
 
   const { width: vidW, height: vidH } = metadata;
 
@@ -92,6 +120,11 @@ export function RegionSelector({
           <p className="text-xs text-slate-400 mt-0.5">
             Confirm the detected boundary box or adjust the coordinates manually to match your overlay.
           </p>
+          {region.analysisExplanation && (
+            <p className="text-[11px] text-cyan-300/90 font-mono mt-1">
+              {region.analysisExplanation}
+            </p>
+          )}
         </div>
 
         {/* Confidence rating indicator */}
@@ -106,16 +139,13 @@ export function RegionSelector({
         <div className="lg:col-span-7 flex flex-col items-center">
           <div className="relative w-full aspect-video rounded-xl bg-black border border-white/15 overflow-hidden flex items-center justify-center shadow-inner">
             {/* Real extracted frame image */}
-            <img
-              src={`/api/v1/jobs/${jobId}/preview?type=frame`}
-              alt="Video candidate frame"
-              className="w-full h-full object-contain"
-              referrerPolicy="no-referrer"
-              onError={(e) => {
-                // If frame thumbnail is not ready, show clean placeholder grid
-                e.currentTarget.style.display = 'none';
-              }}
-            />
+            {frameBlobUrl ? (
+              <img
+                src={frameBlobUrl}
+                alt="Video candidate frame"
+                className="w-full h-full object-contain"
+              />
+            ) : null}
 
             {/* Simulated frame grid pattern */}
             <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff08_1px,transparent_1px),linear-gradient(to_bottom,#ffffff08_1px,transparent_1px)] bg-[size:24px_24px] pointer-events-none" />

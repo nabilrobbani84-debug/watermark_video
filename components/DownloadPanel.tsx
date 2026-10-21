@@ -9,6 +9,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
+import { apiClient } from '@/lib/api-client';
 import type { QualityReport, VideoMetadata } from '@/lib/types';
 
 interface DownloadPanelProps {
@@ -47,16 +48,26 @@ export function DownloadPanel({
     return `${mins}:${remaining < 10 ? '0' : ''}${remaining}`;
   };
 
-  const handleDownload = () => {
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const handleDownload = async () => {
     setIsDownloading(true);
-    const downloadUrl = `/api/v1/jobs/${jobId}/download?token=${token}`;
-    const link = document.createElement('a');
-    link.href = downloadUrl;
-    link.download = `vanishframe_cleaned_${jobId.slice(0, 8)}.mp4`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => setIsDownloading(false), 2000);
+    setDownloadError(null);
+    try {
+      const blob = await apiClient.downloadVideoBlob(jobId, token);
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `vanishframe_cleaned_${jobId.slice(0, 8)}.mp4`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : 'Download failed');
+    } finally {
+      setIsDownloading(false);
+    }
   };
 
   const isExpired = secondsRemaining <= 0;
@@ -126,6 +137,12 @@ export function DownloadPanel({
           <span>{isDownloading ? 'Serving Download...' : 'Download Processed Video'}</span>
         </button>
       </div>
+
+      {downloadError && (
+        <div className="mb-4 p-3 rounded-lg bg-red-950/40 border border-red-800/50 text-red-300 text-xs text-center font-medium animate-in fade-in">
+          {downloadError}
+        </div>
+      )}
 
       {/* Secondary Actions & Privacy Assurance */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-white/10 text-xs text-slate-400">

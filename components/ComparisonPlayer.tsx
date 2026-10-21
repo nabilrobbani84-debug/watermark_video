@@ -11,15 +11,18 @@ import {
   VolumeX,
 } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
+import { apiClient } from '@/lib/api-client';
 
 interface ComparisonPlayerProps {
   jobId: string;
+  token: string;
   originalLabel?: string;
   processedLabel?: string;
 }
 
 export function ComparisonPlayer({
   jobId,
+  token,
   originalLabel = 'Original Video',
   processedLabel = 'Restored Video',
 }: ComparisonPlayerProps) {
@@ -30,10 +33,44 @@ export function ComparisonPlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [viewMode, setViewMode] = useState<'split' | 'side-by-side'>('split');
+  const [procVideoUrl, setProcVideoUrl] = useState<string | null>(null);
+  const [origVideoUrl, setOrigVideoUrl] = useState<string | null>(null);
 
   const origVideoRef = useRef<HTMLVideoElement>(null);
   const procVideoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    let procUrl: string | null = null;
+    let origUrl: string | null = null;
+
+    apiClient
+      .fetchMediaBlob(jobId, token, 'processed')
+      .then((blob) => {
+        if (active) {
+          procUrl = URL.createObjectURL(blob);
+          setProcVideoUrl(procUrl);
+        }
+      })
+      .catch(() => {});
+
+    apiClient
+      .fetchMediaBlob(jobId, token, 'original')
+      .then((blob) => {
+        if (active) {
+          origUrl = URL.createObjectURL(blob);
+          setOrigVideoUrl(origUrl);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+      if (procUrl) URL.revokeObjectURL(procUrl);
+      if (origUrl) URL.revokeObjectURL(origUrl);
+    };
+  }, [jobId, token]);
 
   // Sync videos on timeupdate
   const handleTimeUpdate = () => {
@@ -146,7 +183,7 @@ export function ComparisonPlayer({
             {/* Processed video (background full) */}
             <video
               ref={procVideoRef}
-              src={`/api/v1/jobs/${jobId}/preview?type=processed`}
+              src={procVideoUrl || ''}
               onTimeUpdate={handleTimeUpdate}
               onEnded={() => setIsPlaying(false)}
               className="absolute inset-0 w-full h-full object-contain pointer-events-none"
@@ -161,7 +198,7 @@ export function ComparisonPlayer({
               <div className="relative w-full h-full min-w-full">
                 <video
                   ref={origVideoRef}
-                  src={`/api/v1/jobs/${jobId}/preview?type=original`}
+                  src={origVideoUrl || ''}
                   className="absolute inset-0 w-full h-full object-contain pointer-events-none"
                   playsInline
                 />
@@ -195,7 +232,7 @@ export function ComparisonPlayer({
             <div className="relative h-full">
               <video
                 ref={origVideoRef}
-                src={`/api/v1/jobs/${jobId}/preview?type=original`}
+                src={origVideoUrl || ''}
                 className="w-full h-full object-contain"
                 playsInline
               />
@@ -207,7 +244,7 @@ export function ComparisonPlayer({
             <div className="relative h-full">
               <video
                 ref={procVideoRef}
-                src={`/api/v1/jobs/${jobId}/preview?type=processed`}
+                src={procVideoUrl || ''}
                 onTimeUpdate={handleTimeUpdate}
                 onEnded={() => setIsPlaying(false)}
                 className="w-full h-full object-contain"
